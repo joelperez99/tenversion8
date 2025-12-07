@@ -8,6 +8,7 @@
 # - Columna "Acerto pronostico" en Excel (Si/No/"")
 # - Integra cuotas Bet365 (ganador partido Home/Away) → JSON y Excel
 # - Backtesting: stats SOLO hasta el día anterior al partido
+# - Tab de “Resultados oficiales” (solo estado/ganador/marcador)
 # - Botón de calibración de pesos desde Excel (regresión logística sobre diff_*)
 # - Columna "Coincide_favorito_Bet365" (Si/No/"")
 # - Integra momios Bet365 de marcador de sets (2-0, 2-1, 1-2, 0-2)
@@ -17,7 +18,6 @@
 # - Soporte para usar hasta 20 API keys en round-robin
 # - Features avanzados (power_score, sharpe_score, dominance_index, upset_risk,
 #   clutch_score y master_score)
-# - Timer y velocidad promedio del lote en pantalla (pero SIN auto-guardar Excel)
 
 import os
 import io
@@ -25,8 +25,6 @@ import json
 import math
 import threading
 import time
-import random
-import string
 from datetime import datetime, timedelta
 from functools import lru_cache
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -37,7 +35,7 @@ from urllib3.util.retry import Retry
 from unidecode import unidecode
 
 import pandas as pd
-import numpy as np  # para regresión, tiers y features avanzados
+import numpy as np
 
 import streamlit as st
 
@@ -53,7 +51,6 @@ RANK_BUCKETS = {
 }
 RANK_BUCKETS.setdefault("Other", 0.95)
 
-# ========= manejo de múltiples API keys (hasta 20) =========
 
 def _load_api_keys_from_env():
     keys = []
@@ -66,13 +63,14 @@ def _load_api_keys_from_env():
             keys.append(k)
     return keys
 
+
 API_KEYS = _load_api_keys_from_env()
 _API_IDX = 0
 _API_IDX_LOCK = threading.Lock()
 
 
 def set_api_keys_from_string(s: str):
-    """Lee API keys de un string (separadas por coma o punto y coma) y llena API_KEYS."""
+    """Lee API keys de un string (separadas por coma o punto y coma)."""
     global API_KEYS, _API_IDX
     parts = []
     if s:
@@ -114,6 +112,7 @@ def ensure_api_keys(text: str):
         )
 
 # ===================== UTILIDADES =====================
+
 
 def normalize(s: str) -> str:
     return unidecode(s or "").strip().lower()
@@ -160,6 +159,7 @@ HTTP_TIMEOUT = 25
 
 # ===================== API WRAPPER =====================
 
+
 def call_api(method: str, params: dict):
     params = {k: v for k, v in params.items() if v is not None}
     params.pop("APIkey", None)
@@ -168,7 +168,6 @@ def call_api(method: str, params: dict):
     if not api_key:
         raise RuntimeError("No hay API keys configuradas")
 
-    params["APIkey"] = api_key
     r = SESSION.get(BASE_URL, params={"method": method, **params}, timeout=HTTP_TIMEOUT)
     r.raise_for_status()
     data = r.json()
@@ -188,6 +187,7 @@ def call_api(method: str, params: dict):
     raise RuntimeError(f"{method} → Respuesta no esperada: {data}")
 
 # ===================== ODDS HELPERS =====================
+
 
 def get_bet365_odds_for_match(api_key: str, match_key: int):
     try:
@@ -255,13 +255,15 @@ def get_bet365_setscore_odds_for_match(api_key: str, match_key: int):
 
 # ===================== FIXTURE HELPERS =====================
 
+
 def list_fixtures(api_key: str, date_start: str, date_stop: str, tz: str, player_key=None):
     params = {"date_start": date_start, "date_stop": date_stop, "timezone": tz}
     if player_key:
         params["player_key"] = player_key
     return call_api("get_fixtures", params) or []
 
-# ===================== CACHÉ DE HISTORIAL POR JUGADOR =====================
+# ===================== CACHÉ DE HISTORIAL =====================
+
 
 @lru_cache(maxsize=3000)
 def cached_player_history(api_key: str, player_key: int, days_back: int = 180):
@@ -279,6 +281,7 @@ def cached_player_history(api_key: str, player_key: int, days_back: int = 180):
     return tuple(res)
 
 # ===================== FIXTURE POR MATCH_KEY =====================
+
 
 def get_fixture_by_key(api_key: str, match_key: int, tz: str = "Europe/Berlin", center_date: str | None = None):
     # 1) Intento directo con get_events
@@ -348,6 +351,7 @@ def get_fixture_by_key(api_key: str, match_key: int, tz: str = "Europe/Berlin", 
         )
 
 # ===================== FEATURE ENGINEERING =====================
+
 
 def get_player_matches(api_key: str, player_key: int, days_back=180, ref_date: str | None = None):
     all_matches = list(cached_player_history(api_key, player_key, days_back))
@@ -514,6 +518,7 @@ def elo_synth_from_opposition(matches, player_name_norm: str):
 
 # ===================== H2H =====================
 
+
 def compute_h2h(api_key, player_key_a, player_key_b, years_back=3,
                 ref_date: str | None = None, current_match_key: int | None = None):
     days_back = 365 * years_back
@@ -603,6 +608,7 @@ def cached_bet365_sets(api_key: str, match_key: int):
 
 # ===================== MODELO Y SALIDA =====================
 
+
 def calibrate_probability(diff, weights, gamma=3.0, bias=0.0, bonus=0.0, malus=0.0):
     wsum = sum(weights.values()) or 1.0
     w = {k: v / wsum for k, v in weights.items()}
@@ -648,7 +654,8 @@ def to_decimal(p):
     p = clamp(p, 0.01, 0.99)
     return round(1.0 / p, 3)
 
-# ========= Reglas de Tiers (Pick_VIP_90 / Pick_Fuerte_85) =========
+# ========= Reglas de Tiers =========
+
 
 def aplicar_reglas_tiers(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
@@ -676,6 +683,7 @@ def aplicar_reglas_tiers(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 # ========= Features avanzados =========
+
 
 def agregar_features_avanzados(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
@@ -741,6 +749,7 @@ def agregar_features_avanzados(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 # ===================== CÁLCULO PRINCIPAL =====================
+
 
 def compute_from_fixture(api_key: str, meta: dict, surface_hint: str,
                          weights: dict, gamma: float, bias: float):
@@ -932,6 +941,7 @@ def compute_from_fixture(api_key: str, meta: dict, surface_hint: str,
 
 # ===================== HELPERS PARA STREAMLIT =====================
 
+
 def find_match_by_names(api_key, date_str, p1, p2, tz):
     p1n, p2n = normalize(p1), normalize(p2)
     base = datetime.strptime(date_str, "%Y-%m-%d").date()
@@ -1050,10 +1060,7 @@ def build_export_dataframe(results_batch: list) -> pd.DataFrame:
             favored_side_b365 = None
 
         if favored_side_synth and favored_side_b365:
-            if favored_side_synth == favored_side_b365:
-                coincide_fav = "Si"
-            else:
-                coincide_fav = "No"
+            coincide_fav = "Si" if favored_side_synth == favored_side_b365 else "No"
         else:
             coincide_fav = ""
 
@@ -1143,6 +1150,10 @@ if "batch_errors" not in st.session_state:
     st.session_state["batch_errors"] = []
 if "batch_stats" not in st.session_state:
     st.session_state["batch_stats"] = {}
+if "results_only" not in st.session_state:
+    st.session_state["results_only"] = []
+if "results_only_errors" not in st.session_state:
+    st.session_state["results_only_errors"] = []
 
 with st.sidebar:
     st.header("⚙️ Configuración global")
@@ -1183,7 +1194,9 @@ weights = {
     "travel": w_trav,
 }
 
-tab_single, tab_batch, tab_calib = st.tabs(["🔹 Individual", "🔁 Lote por match_key", "📈 Calibrar pesos desde Excel"])
+tab_single, tab_batch, tab_results_only, tab_calib = st.tabs(
+    ["🔹 Individual", "🔁 Lote — Momios", "📊 Resultados oficiales", "📈 Calibrar pesos"]
+)
 
 # ---------- TAB INDIVIDUAL ----------
 
@@ -1243,10 +1256,10 @@ with tab_single:
         except Exception as e:
             st.error(f"Error en cálculo individual: {e}")
 
-# ---------- TAB BATCH ----------
+# ---------- TAB BATCH (MOMIOS) ----------
 
 with tab_batch:
-    st.subheader("Cálculo por lote (match_keys)")
+    st.subheader("Cálculo por lote (match_keys) — Momios y métricas")
 
     st.markdown(
         "Introduce **match_key** uno por línea, separados por coma o espacios. "
@@ -1254,21 +1267,19 @@ with tab_batch:
     )
     raw_keys = st.text_area("match_keys", height=150, placeholder="12035106\n12035138\n12035140 ...")
 
-    colb1, colb2, colb3 = st.columns(3)
+    colb1, colb2, _ = st.columns(3)
     with colb1:
         tz_batch = st.text_input("Timezone lote (IANA)", value="Europe/Berlin", key="tz_batch")
     with colb2:
         center_date_batch = st.text_input(
             "Fecha estimada (YYYY-MM-DD, opcional)", value="", key="center_date_batch"
         )
-    with colb3:
-        st.markdown("")
 
     log_placeholder = st.empty()
     progress_bar = st.progress(0.0)
     summary_placeholder = st.empty()
 
-    if st.button("Calcular lote"):
+    if st.button("Calcular lote (momios)"):
         keys = parse_batch_keys(raw_keys)
         if not keys:
             st.warning("No se encontraron match_keys válidos.")
@@ -1280,9 +1291,10 @@ with tab_batch:
                 st.error(f"Error con API keys: {e}")
             else:
                 log_lines = []
+
                 def log(msg):
                     log_lines.append(msg)
-                    log_placeholder.text("\n".join(log_lines[-50:]))
+                    log_placeholder.text("\n".join(log_lines[-80:]))
 
                 total = len(keys)
                 errors = []
@@ -1342,7 +1354,7 @@ with tab_batch:
                                 )
                             else:
                                 errors.append((mk_ret, err))
-                                log(f"   ERROR {mk_ret}: {err}")
+                                log(f"   ERROR {mk_ret}: {repr(err)}")
 
                             done_count += 1
                             progress_bar.progress(done_count / total)
@@ -1406,6 +1418,98 @@ with tab_batch:
             )
         except Exception as e:
             st.error(f"Error preparando DataFrame para exportar: {e}")
+
+# ---------- TAB RESULTADOS OFICIALES ----------
+
+with tab_results_only:
+    st.subheader("Resultados oficiales (solo estado / ganador / marcador)")
+
+    st.markdown(
+        "Introduce **match_key** uno por línea, separados por coma o espacios. "
+        "Se eliminarán duplicados automáticamente."
+    )
+    raw_keys_res = st.text_area(
+        "match_keys (resultados oficiales)",
+        height=150,
+        placeholder="12035106\n12035138\n12035140 ...",
+    )
+
+    colr1, colr2, _ = st.columns(3)
+    with colr1:
+        tz_res = st.text_input("Timezone (IANA) resultados", value="Europe/Berlin", key="tz_res")
+    with colr2:
+        center_date_res = st.text_input(
+            "Fecha estimada (YYYY-MM-DD, opcional)", value="", key="center_date_res"
+        )
+
+    log_res_placeholder = st.empty()
+    progress_res_bar = st.progress(0.0)
+
+    if st.button("Consultar resultados oficiales"):
+        keys = parse_batch_keys(raw_keys_res)
+        if not keys:
+            st.warning("No se encontraron match_keys válidos.")
+        else:
+            try:
+                ensure_api_keys(api_text)
+                api_key_cache = API_KEYS[0]
+            except Exception as e:
+                st.error(f"Error con API keys: {e}")
+            else:
+                log_lines = []
+
+                def log_res(msg):
+                    log_lines.append(msg)
+                    log_res_placeholder.text("\n".join(log_lines[-80:]))
+
+                total = len(keys)
+                results = []
+                errors = []
+
+                log_res(f"Iniciando consulta de resultados para {total} partidos...")
+
+                for idx, mk in enumerate(keys, start=1):
+                    log_res(f"[{idx}/{total}] match_key {mk}…")
+                    try:
+                        meta = get_fixture_by_key(
+                            api_key_cache,
+                            mk,
+                            tz=tz_res.strip() or "Europe/Berlin",
+                            center_date=center_date_res.strip() or None,
+                        )
+                        item = {
+                            "match_key": safe_int(meta.get("event_key")),
+                            "date": meta.get("event_date"),
+                            "time": meta.get("event_time"),
+                            "league": meta.get("league_name"),
+                            "tournament": meta.get("event_tournament_name"),
+                            "player1": meta.get("event_first_player"),
+                            "player2": meta.get("event_second_player"),
+                            "status": meta.get("event_status"),
+                            "winner_side": meta.get("event_winner"),
+                            "winner_name": (
+                                meta.get("event_first_player") if meta.get("event_winner") == "First Player"
+                                else (meta.get("event_second_player") if meta.get("event_winner") == "Second Player" else None)
+                            ),
+                            "final_sets": (meta.get("event_final_result") or "").strip() or None,
+                        }
+                        results.append(item)
+                        log_res(f"   OK {mk}: {item['winner_name']} ({item['final_sets']})")
+                    except Exception as e:
+                        msg_err = str(e)
+                        errors.append((mk, msg_err))
+                        log_res(f"   ERROR {mk}: {repr(msg_err)}")
+                    progress_res_bar.progress(idx / total)
+
+                st.session_state["results_only"] = results
+                st.session_state["results_only_errors"] = errors
+
+                st.markdown("### JSON resultados")
+                st.json({"count": len(results), "results": results, "errors": errors})
+
+                if results:
+                    st.markdown("### Tabla de resultados")
+                    st.dataframe(pd.DataFrame(results))
 
 # ---------- TAB CALIBRACIÓN DESDE EXCEL ----------
 
@@ -1512,7 +1616,7 @@ with tab_calib:
 
             st.info(
                 "Copia manualmente estos pesos a los sliders del sidebar para usarlos en el modelo "
-                "(no se pueden actualizar sliders automáticamente desde aquí)."
+                "(Streamlit no permite mover sliders desde el código)."
             )
 
         except Exception as e:
