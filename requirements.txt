@@ -1,0 +1,9 @@
+streamlit
+requests
+urllib3
+pandas
+numpy
+unidecode
+openpyxl
+scikit-learn
+python-dateutil
